@@ -1,4 +1,4 @@
-(defproject biiwide/deepend "0.0.1-SNAPSHOT"
+(defproject biiwide/deepend "0.0.1"
 
   :description "Idiomatic object pools in Clojure."
 
