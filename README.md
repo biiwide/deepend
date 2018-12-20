@@ -2,7 +2,7 @@
 
 Idiomatic connection pools in Clojure.
 
-Based on (Dirigiste)[https://github.com/ztellman/dirigiste].
+Based on [Dirigiste](https://github.com/ztellman/dirigiste).
 
 [![Clojars Project](https://img.shields.io/clojars/v/biiwide/deepend.svg)](https://clojars.org/biiwide/deepend)
 

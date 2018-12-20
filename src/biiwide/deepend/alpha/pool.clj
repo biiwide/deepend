@@ -1,11 +1,17 @@
 (ns biiwide.deepend.alpha.pool
   (:require [biiwide.deepend.alpha.stats :as stats]
             [clojure.spec.alpha :as s]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.test.check.generators :as gen])
   (:import  [java.util.concurrent TimeUnit]
             [io.aleph.dirigiste
              IPool IPool$AcquireCallback IPool$Controller IPool$Generator
              Pool Pools Stats]))
+
+
+(s/fdef generator?
+  :args (s/tuple any?)
+  :ret  boolean?)
 
 
 (definline generator?
@@ -14,10 +20,12 @@
 
 
 (s/def ::generator generator?)
+(s/def ::generate fn?)
+(s/def ::destroy fn?)
 
 
 (s/fdef generator
-  :args (s/tuple fn? fn?)
+  :args (s/tuple ::generate ::destroy)
   :ret  ::generator)
 
 
@@ -62,7 +70,7 @@
                 (map next body))]
     `(do (defrecord ~typename
            ~fields
-           IPool$Generate
+           IPool$Generator
            (~'generate [_# ~@(first generate)]
              ~@(next generate))
            (~'destroy [_# ~@(first destroy)]
@@ -71,16 +79,28 @@
            (new ~typename ~@fields)))))
 
 
+
+(s/fdef controller?
+  :args (s/tuple any?)
+  :ret  boolean?)
+
+
 (definline controller?
   [x]
   `(instance? IPool$Controller ~x))
 
 
-(s/def ::controller controller?)
+(declare get-controller)
+
+(s/def ::controller
+  (s/with-gen controller?
+    #(gen/fmap get-controller
+               (s/gen (s/or :fixed ::fixed-controller-options
+                            :util  ::utilization-controller-options)))))
 
 
 (s/fdef controller
-  :args (s/tuple fn? fn?)
+  :args (s/tuple ::increment? ::adjustment)
   :ret  ::controller)
 
 
@@ -177,7 +197,8 @@
 (s/fdef acquire-callback
   :args (s/cat :binding (s/coll-of simple-symbol? :kind vector? :count 1)
                :body    any?)
-  :ret ::acquire-callback)
+  :ret (and ::acquire-callback
+            (s/fspec :args (s/tuple any?) :ret any?)))
 
 
 (defmacro acquire-callback
@@ -245,6 +266,39 @@
   (shutdown [_]
     (.shutdown delegate-pool)))
 
+(s/def ::check-on-acquire boolean?)
+(s/def ::check-on-release boolean?)
+(s/def ::max-acquire-attempts pos-int?)
+
+
+(s/fdef simple-checked-pool
+  :args (s/cat :pool ::pool
+               :healthy? ::healthy?
+               :options (s/keys :opt-un [::check-on-acquire
+                                         ::check-on-release
+                                         ::max-acquire-attempts])))
+
+
+(defn simple-checked-pool
+  [delegate-pool healthy?
+   {:keys [check-on-acquire
+           check-on-release
+           max-acquire-attempts]
+      :or {check-on-acquire true
+           check-on-release true
+           max-acquire-attempts 4}}]
+  (SimpleCheckedPool. delegate-pool healthy?
+     check-on-acquire check-on-release
+     max-acquire-attempts))
+
+
+(s/def ::simple-checked-pool-options
+  (s/keys :req-un [::healthy?]
+          :opt-un [::check-on-acquire
+                   ::check-on-release
+                   ::max-acquire-attempts]))
+
+
 
 (definline ^:private time-unit?
   [x]
@@ -273,18 +327,18 @@
                        (format "Invalid TimeUnit: %s %s"
                          (class timeunit) timeunit)))))
 
-(s/def ::generate fn?)
-(s/def ::destroy fn?)
 
 (s/def ::generator-options
   (s/alt :generator     (s/keys :req-un [::generator])
          :generator-fns (s/keys :req-un [::generate
                                          ::destroy])))
 
+
 (s/fdef get-generator
   :args (s/tuple ::generator-options)
   :ret  (s/or :generator ::generator
               :nothing   nil?))
+
 
 (defn- get-generator
   "Find or construct an Object Generator from a pool options map."
@@ -295,7 +349,6 @@
         (generator generate destroy))))
 
 
-(s/def ::controller IPool$Controller)
 (s/def ::increment? fn?)
 (s/def ::adjustment fn?)
 (s/def ::target-utilization
@@ -310,7 +363,7 @@
 
 (s/def ::fixed-controller-options
   (s/and (s/keys :opt-un [::max-objects
-                          ::max-objects-per-keys
+                          ::max-objects-per-key
                           ::max-objects-total])
          (s/or   :max-objects         (s/keys :req-un [::max-objects])
                  :max-objects-per-key (s/keys :req-un [::max-objects-per-key])
@@ -318,8 +371,8 @@
 
 
 (s/def ::utilization-controller-options
-  (s/and (s/keys :req-un [::target-utilization])
-         ::fixed-controller-options))
+  (s/merge (s/keys :req-un [::target-utilization])
+           ::fixed-controller-options))
 
 
 (s/def ::controller-options
@@ -359,14 +412,6 @@
           (int (or max-objects-total max-objects max-object-per-key))))))
 
 
-(definline pool?
-  [x]
-  `(instance? IPool ~x))
-
-
-(s/def ::pool pool?)
-
-
 (s/def ::max-queue-length pos-int?)
 (s/def ::sample-period    pos-int?)
 (s/def ::control-period   pos-int?)
@@ -381,23 +426,41 @@
                           ::time-unit])))
 
 
+(s/fdef pool?
+  :args (s/tuple any?)
+  :ret  boolean?)
+
+
+(definline pool?
+  [x]
+  `(instance? IPool ~x))
+
+
+(s/def ::pool pool?)
+
+
 (s/fdef pool
-  :args (s/tuple ::pool-options)
+  :args (s/tuple (s/or :pool    ::pool
+                       :options ::pool-options))
   :ret  pool?)
 
 
 (defn pool
-  [{:as pool-options
-    :keys [max-queue-length sample-period control-period
-           time-unit]}]
-  (Pool. (or (get-generator pool-options)
-             (throw (ex-info "Missing Generator" pool-options)))
-         (or (get-controller pool-options)
-             (throw (ex-info "Missing Controller" pool-options)))
-         (int (or max-queue-length 65536))
-         (long (or sample-period 25))
-         (long (or control-period 1000))
-         (->timeunit (or time-unit TimeUnit/MILLISECONDS))))
+  [pool-options]
+  (cond (pool? pool-options)
+        pool-options
+        (map? pool-options)
+        (cond-> (Pool. (or (get-generator pool-options)
+                           (throw (ex-info "Missing Generator" pool-options)))
+                       (or (get-controller pool-options)
+                           (throw (ex-info "Missing Controller" pool-options)))
+                       (int (:max-queue-length pool-options 65536))
+                       (long (:sample-period pool-options 25))
+                       (long (:control-period pool-options 1000))
+                       (->timeunit (:time-unit pool-options TimeUnit/MILLISECONDS)))
+
+                (s/valid? pool-options ::simple-checked-pool-options)
+                (simple-checked-pool (:healty? pool-options) pool-options))))
 
 
 (s/fdef acquire!
@@ -406,6 +469,7 @@
 
 
 (definline acquire!
+  "Acquire an object from a pool for a key."
   [^IPool pool key]
   `(.acquire ~pool ~key))
 
@@ -418,36 +482,43 @@
 
 
 (definline async-acquire!
+  "Asynchronously acquire and use an object from
+  a pool for a key"
   [^IPool pool key callback]
   `(.acquire ~pool ~key (callback* ~callback)))
 
 
 (s/fdef release!
-  :args (s/cat :pool IPool :key any? :object any?)
-  :ret  nil?)
+  :args (s/cat :pool ::pool :key any? :object any?)
+  :ret  pool?)
 
 
 (definline release!
+  "Release an object for a key back to a pool."
   [^IPool pool key obj]
-  `(.release ~pool ~key ~obj))
+  `(do (.release ~pool ~key ~obj)
+       ~pool))
 
 
 (s/fdef dispose!
-  :args (s/cat :pool IPool :key any? :object any?)
-  :ret  nil?)
+  :args (s/cat :pool ::pool :key any? :object any?)
+  :ret  pool?)
 
 
 (definline dispose!
+  "Dispose of an object for a key from a pool."
   [^IPool pool key obj]
-  `(.destroy ~pool ~key ~obj))
+  `(do (.dispose ~pool ~key ~obj)
+       ~pool))
 
 
 (s/fdef shutdown!
-  :args (s/tuple IPool)
+  :args (s/tuple ::pool)
   :ret  nil?)
 
 
 (definline shutdown!
+  "Shutdown a pool."
   [^IPool pool]
   `(.shutdown ~pool))
 
@@ -457,7 +528,8 @@
                                (s/spec (s/cat :sym simple-symbol?
                                               :pool any?
                                               :key  (s/? any?))))
-               :body (s/* any?)))
+               :body (s/* any?))
+  :ret  any?)
 
 
 (defmacro with-resource
@@ -468,21 +540,40 @@
   [binding & body]
   (let [[sym pool key] binding
         key (or key ::NO-KEY)]
-    `(let [~sym (acquire ~pool ~key)]
+    `(let [~sym (acquire! ~pool ~key)]
        (try (do ~@body)
-         (finally (release ~pool ~key))))))
+         (finally (release! ~pool ~key ~sym))))))
 
 
-(defmacro async-with-resource
-  "Like with-resource, but acquire a
-  resource asynchronously and return
-  a promise yielding the result."
+;(s/fdef async-with-resource
+;  :args (s/cat :binding (s/and vector?
+;                               (s/spec (s/cat :sym simple-symbol?
+;                                              :pool any?
+;                                              :key  (s/? any?))))
+;               :body (s/* any?))
+;  :ret any?)
+
+
+;(defmacro async-with-resource
+;  "Like with-resource, but acquires a
+;  resource asynchronously and returns
+;  a promise yielding the result."
+;  [binding & body]
+;  (let [[sym pool key] binding
+;        key (or key ::NO-KEY)
+;    `(let [p# (promise)]
+;       (acquire! ~pool ~key
+;         (acquire-callback [~sym]
+;           (try (deliver p# (do ~@body))
+;             (finally (release! ~pool ~key ~sym))
+;       p#)
+
+
+(defmacro with-pool
+  "Construct and use a pool within a scope.
+Shuts down the pool when finished."
   [binding & body]
-  (let [[sym pool key] binding
-        key (or key ::NO-KEY)]
-    `(let [p# (promise)]
-       (acquire ~pool ~key
-         (acquire-callback [~sym]
-           (try (deliver p# (do ~@body))
-             (finally (release ~pool ~key)))))
-       p#)))
+  (let [[sym pool-opts] binding]
+    `(let [~sym (pool ~pool-opts)]
+      (try (do ~@body)
+        (finally (shutdown! ~sym))))))
