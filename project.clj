@@ -11,5 +11,15 @@
                  [io.aleph/dirigiste "0.1.5"]]
 
   :profiles {:dev {:dependencies [[org.clojure/test.check "0.9.0"]
-                                  [proto-repl "0.3.1"]]}})
+                                  [proto-repl "0.3.1"]]}}
+
+  :release-tasks [["vcs" "assert-committed"]
+                  ["change" "version" "leiningen.release/bump-version" "release"]
+                  ["vcs" "commit"]
+                  ["vcs" "tag" "--no-sign"]
+                  ["deploy"]
+                  ["change" "version" "leiningen.release/bump-version"]
+                  ["vcs" "commit"]
+                  ["vcs" "push"]]
+  )
                                   
