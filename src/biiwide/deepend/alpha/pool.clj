@@ -10,7 +10,7 @@
 
 
 (s/fdef generator?
-  :args (s/tuple any?)
+  :args (s/cat :x any?)
   :ret  boolean?)
 
 
@@ -25,7 +25,7 @@
 
 
 (s/fdef generator
-  :args (s/tuple ::generate ::destroy)
+  :args (s/cat :generate ::generate :destroy ::destroy)
   :ret  ::generator)
 
 
@@ -50,8 +50,8 @@
 (s/fdef defgenerator
   :args (s/cat :name   simple-symbol?
                :fields (s/coll-of simple-symbol? :kind vector? :distinct true)
-               :body   (s/* (s/alt :generate (fnjorm 'generate 1)
-                                   :destroy  (fnjorm 'destroy 2))))
+               :body   (s/* (s/or :generate (fnjorm 'generate 1)
+                                  :destroy  (fnjorm 'destroy 2))))
   :ret  any?)
 
 
@@ -81,7 +81,7 @@
 
 
 (s/fdef controller?
-  :args (s/tuple any?)
+  :args (s/cat :x any?)
   :ret  boolean?)
 
 
@@ -100,7 +100,8 @@
 
 
 (s/fdef controller
-  :args (s/tuple ::increment? ::adjustment)
+  :args (s/cat :increment? ::increment?
+               :adjustment ::adjustment)
   :ret  ::controller)
 
 
@@ -116,8 +117,8 @@
 (s/fdef defcontroller
   :args (s/cat :name   simple-symbol?
                :fields (s/coll-of simple-symbol? :kind vector? :distinct true)
-               :body   (s/* (s/alt :increment? (fnjorm 'increment? 3 any?)
-                                   :adjustment (fnjorm 'adjustment 1 any?))))
+               :body   (s/* (s/or :increment? (fnjorm 'increment? 3 any?)
+                                  :adjustment (fnjorm 'adjustment 1 any?))))
   :ret  any?)
 
 
@@ -146,16 +147,16 @@
 
 
 (defn- map-values
-  [m f]
-  (persistent!
-    (reduce-kv (fn [m k v] (assoc! m k (f v)))
-               (transient {})
-               m)))
+  [f m]
+  (zipmap (keys m)
+          (map f (vals m))))
 
 
 (s/fdef utilization-controller
-  :args (and (s/tuple ::target-utilization ::max-objects-per-key ::max-objects-total)
-             ())
+  :args (s/cat :target-utilization  ::target-utilization
+               :max-objects-per-key ::max-objects-per-key
+               :max-objects-total   ::max-objects-total)
+
   :ret  controller?)
 
 
@@ -165,11 +166,12 @@
     (and (< key-objects max-objects-per-key)
          (< total-objects max-objects-total)))
   (adjustment [stats-map]
-    (map-values stats-map
+    (map-values
       (fn [^Stats s]
         (Math/ceil (- (* (stats/num-workers s)
                          (/ (stats/utilization s 1.0) target-utilization))
-                      (stats/num-workers s)))))))
+                      (stats/num-workers s))))
+      stats-map)))
 
 
 (s/fdef fixed-controller
@@ -306,14 +308,14 @@
 
 
 (s/def ::time-unit
-  (s/alt :time-unit time-unit?
-         :keyword   #{:nanoseconds :microseconds
-                      :milliseconds :seconds
-                      :minutes :hours :days}))
+  (s/or :time-unit time-unit?
+        :keyword   #{:nanoseconds :microseconds
+                     :milliseconds :seconds
+                     :minutes :hours :days}))
 
 
 (s/fdef ->time-unit
-  :args (s/tuple ::time-unit)
+  :args (s/cat :time-unit? ::time-unit)
   :ret  time-unit?)
 
 
@@ -329,13 +331,13 @@
 
 
 (s/def ::generator-options
-  (s/alt :generator     (s/keys :req-un [::generator])
-         :generator-fns (s/keys :req-un [::generate
-                                         ::destroy])))
+  (s/or :generator     (s/keys :req-un [::generator])
+        :generator-fns (s/keys :req-un [::generate
+                                        ::destroy])))
 
 
 (s/fdef get-generator
-  :args (s/tuple ::generator-options)
+  :args (s/cat :opts ::generator-options)
   :ret  (s/or :generator ::generator
               :nothing   nil?))
 
@@ -376,15 +378,15 @@
 
 
 (s/def ::controller-options
-  (s/alt :controller     (s/keys :req-un [::controller])
-         :controller-fns (s/keys :req-un [::increment?
-                                          ::adjustment])
-         :utilz-opts     ::utilization-controller-options
-         :fixed-opts     ::fixed-controller-options))
+  (s/or :controller     (s/keys :req-un [::controller])
+        :controller-fns (s/keys :req-un [::increment?
+                                         ::adjustment])
+        :utilz-opts     ::utilization-controller-options
+        :fixed-opts     ::fixed-controller-options))
 
 
 (s/fdef get-controller
-  :args (s/tuple ::controller-options)
+  :args (s/cat :opts ::controller-options)
   :ret  (s/or :controller ::controller
               :nothing    nil?))
 
@@ -427,7 +429,7 @@
 
 
 (s/fdef pool?
-  :args (s/tuple any?)
+  :args (s/cat :x any?)
   :ret  boolean?)
 
 
@@ -440,8 +442,8 @@
 
 
 (s/fdef pool
-  :args (s/tuple (s/or :pool    ::pool
-                       :options ::pool-options))
+  :args (s/cat :opts (s/or :pool    ::pool
+                           :options ::pool-options))
   :ret  pool?)
 
 
@@ -476,8 +478,8 @@
 
 (s/fdef async-acquire!
   :args (s/cat :pool ::pool :key any?
-               :callback (s/alt :function fn?
-                                :callback ::acquire-callback))
+               :callback (s/or :function fn?
+                               :callback ::acquire-callback))
   :ret  nil?)
 
 
@@ -513,7 +515,7 @@
 
 
 (s/fdef shutdown!
-  :args (s/tuple ::pool)
+  :args (s/cat :pool ::pool)
   :ret  nil?)
 
 
