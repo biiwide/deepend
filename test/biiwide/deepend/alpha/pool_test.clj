@@ -180,3 +180,36 @@
                                             (disj state obj))))
                            #{}
                            @history))))))))
+
+
+(defspec simple-checked-pool-healthy?-spec
+  (props/for-all [check-on-acquire? gen/boolean
+                  check-on-release? gen/boolean
+                  attempts          gen/s-pos-int
+                  max-objects       gen/s-pos-int]
+    (let [check-state (atom 0)
+          checked     (fn []
+                        (let [attempts @check-state]
+                          (reset! check-state 0)
+                          attempts))
+          generated  (atom [])
+          destroyed  (atom [])]
+      (p/with-pool [p {:generate         (fn [k]
+                                           (let [obj [k (rand-int 100)]]
+                                             (swap! generated conj obj)
+                                             obj))
+                       :destroy          (fn [k obj]
+                                           (swap! destroyed conj obj))
+                       :max-objects      max-objects
+                       :healthy?         (fn healthy? [k1 [k2 n]]
+                                           (= attempts (swap! check-state inc)))
+                       :check-on-acquire check-on-acquire?
+                       :check-on-release check-on-release?
+                       :max-acquire-attempts (inc attempts)}]
+        (and (is (p/checked-pool? p))
+             (p/with-resource [[k n] p]
+               (and (is (= (if check-on-acquire? attempts 0)
+                           (checked)))
+                    (is (= (if check-on-acquire? attempts 1)
+                           (count @generated)))))
+             (is (= (if check-on-release? 1 0) (checked))))))))

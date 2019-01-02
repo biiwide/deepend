@@ -2,6 +2,7 @@
   (:require [biiwide.deepend.alpha.stats :as stats]
             [biiwide.deepend.alpha.reflect
              :refer [private-field]]
+            [clojure.core.specs.alpha :as core]
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.test.check.generators :as gen])
@@ -51,7 +52,7 @@
    `(fnjorm ~name ~args any?))
   ([name args & body]
    `(s/spec (s/cat :name     #{~name}
-                   :bindings (s/coll-of simple-symbol? :kind vector? :count ~args :distinct true)
+                   :bindings (s/coll-of ::core/binding-form :kind vector? :count ~args)
                    :body     (s/* ~@body)))))
 
 
@@ -215,7 +216,7 @@
 
 
 (s/fdef acquire-callback
-  :args (s/cat :binding (s/coll-of simple-symbol? :kind vector? :count 1)
+  :args (s/cat :binding (s/coll-of ::core/binding-form :kind vector? :count 1)
                :body    any?)
   :ret (and ::acquire-callback
             (s/fspec :args (s/cat :? any?) :ret any?)))
@@ -250,19 +251,28 @@
 (defn- checked-acquire
   [pool k healthy? ^IPool$AcquireCallback callback attempts]
   (acquire-callback [obj]
-    (if (healthy? obj)
-      (.handleObject callback obj)
-      (if (pos? attempts)
-        (.acquire pool k (checked-acquire pool k healthy? callback (dec attempts)))
-        (.handleObject callback nil)))))
+    (cond (healthy? k obj)
+          (.handleObject callback obj)
+          (pos? attempts)
+          (do (.dispose pool k obj)
+              (.acquire pool k (checked-acquire pool k healthy? callback (dec attempts))))
+          :else
+          (.handleObject callback nil))))
 
 
-(defprotocol IPoolState
+(defprotocol CheckedPool)
+
+(defn checked-pool?
+  [x]
+  (extends? CheckedPool (class x)))
+
+
+(defprotocol StatefulPool
   (-shutdown? [pool] "Internal predicate"))
 
 
 (extend Pool
-  IPoolState
+  StatefulPool
   {:-shutdown? (private-field Pool "_isShutdown" Boolean/TYPE)})
 
 
@@ -271,6 +281,7 @@
    check-on-acquire
    check-on-release
    max-acquire-attempts]
+  CheckedPool
   IPool
   (acquire  [_ k callback]
     (.acquire delegate-pool
@@ -294,7 +305,7 @@
     (.dispose delegate-pool k obj))
   (shutdown [_]
     (.shutdown delegate-pool))
-  IPoolState
+  StatefulPool
   (-shutdown? [_]
     (-shutdown? delegate-pool)))
 
@@ -309,17 +320,18 @@
                      :min 1})))))
 
 
+(s/def ::healthy? fn?)
 (s/def ::check-on-acquire boolean?)
 (s/def ::check-on-release boolean?)
 (s/def ::max-acquire-attempts ::pos-int32)
 
 
 (s/fdef simple-checked-pool
-  :args (s/cat :pool ::pool
+  :args (s/cat :pool     ::pool
                :healthy? ::healthy?
-               :options (s/keys :opt-un [::check-on-acquire
-                                         ::check-on-release
-                                         ::max-acquire-attempts])))
+               :options  (s/keys :opt-un [::check-on-acquire
+                                          ::check-on-release
+                                          ::max-acquire-attempts])))
 
 
 (defn simple-checked-pool
@@ -509,8 +521,8 @@
                        (long (:control-period pool-options DEFAULT_CONTROL_PERIOD))
                        (->timeunit (:time-unit pool-options DEFAULT_TIME_UNIT)))
 
-                (s/valid? pool-options ::simple-checked-pool-options)
-                (simple-checked-pool (:healty? pool-options) pool-options))))
+                (s/valid? ::simple-checked-pool-options pool-options)
+                (simple-checked-pool (:healthy? pool-options) pool-options))))
 
 
 (s/fdef acquire!
@@ -582,9 +594,9 @@ Returns the pool."
 
 (s/fdef with-resource
   :args (s/cat :binding (s/spec (s/and vector?
-                                       (s/cat :sym simple-symbol?
-                                              :pool any?
-                                              :key  (s/? any?))))
+                                       (s/cat :binding ::core/binding-form
+                                              :pool    any?
+                                              :key     (s/? any?))))
                :body (s/* any?))
   :ret  any?)
 
