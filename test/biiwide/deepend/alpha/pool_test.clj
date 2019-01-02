@@ -70,6 +70,7 @@
                         (gen/one-of [(gen-result `p/fixed-controller gs)
                                      (gen-result `p/utilization-controller gs)]))
      ::p/controller   `p/get-controller
+     ::p/max-queue-length (gen/return  65536)
      ::p/pool         (fn [gs]
                         (gen/fmap p/pool
                                   (s/gen ::p/pool-options gs)))]))
@@ -140,3 +141,42 @@
                 (.interrupt t)
                 (.getName t)))
          (into []))))
+
+
+(defspec with-resource-spec 60
+  (props/for-all [pool-opts (s/gen ::p/pool-options pool-overrides)
+                  durations (gen/vector (gen/frequency [[5 (gen/choose 0 7)]
+                                                        [1 (gen/return nil)]])
+                                        10 200)]
+    (let [history (agent [])]
+      (p/with-pool [p (assoc pool-opts :generator (uuids)
+                                       :max-queue-length (inc (count durations)))]
+        (count (pmap (fn [i duration]
+                       (try
+                         (p/with-resource [obj p]
+                           (send history conj [:acquire obj i])
+                           (try
+                             (Thread/sleep duration)
+                             (finally
+                               (send history conj [:release obj i]))))
+                         (catch NullPointerException e e)))
+                     (range)
+                     durations)))
+      (when (is (await-for 1000 history)
+                "History must be complete")
+        (and (is (= (* 2 (count durations)))
+                 (count @history))
+             (is (< (count durations))
+                 (count (distinct (map second @history))))
+             (is (empty?
+                   (reduce (fn [state [action obj i]]
+                             (case action
+                               :acquire (do (is (not (contains? state obj))
+                                                (str "Object re-acquired before release: " [i obj]))
+                                            (conj state obj))
+
+                               :release (do (is (contains? state obj)
+                                                (str "Unexpected release: " [i obj]))
+                                            (disj state obj))))
+                           #{}
+                           @history))))))))

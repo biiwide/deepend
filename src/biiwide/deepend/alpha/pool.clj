@@ -182,9 +182,10 @@
   (adjustment [stats-map]
     (map-values
       (fn [^Stats s]
-        (Math/ceil (- (* (stats/num-workers s)
-                         (/ (stats/utilization s 1.0) target-utilization))
-                      (stats/num-workers s))))
+        (.intValue
+          (Math/ceil (- (* (stats/num-workers s)
+                           (/ (stats/utilization s 1.0) target-utilization))
+                        (stats/num-workers s)))))
       stats-map)))
 
 
@@ -455,8 +456,8 @@
 
 
 (s/def ::max-queue-length ::pos-int32)
-(s/def ::sample-period    pos-int?)
-(s/def ::control-period   pos-int?)
+(s/def ::sample-period    (s/int-in 1 (*  2 60 1000)))
+(s/def ::control-period   (s/int-in 1 (* 10 60 1000)))
 
 
 (s/def ::pool-options
