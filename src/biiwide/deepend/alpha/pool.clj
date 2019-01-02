@@ -1,5 +1,7 @@
 (ns biiwide.deepend.alpha.pool
   (:require [biiwide.deepend.alpha.stats :as stats]
+            [biiwide.deepend.alpha.reflect
+             :refer [private-field]]
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.test.check.generators :as gen])
@@ -31,10 +33,16 @@
 
 (defn generator
   [generate destroy]
-  (reify IPool$Generator
+  (reify
+    IPool$Generator
     (generate [_ key]
       (generate key))
     (destroy [_ key obj]
+      (destroy key obj))
+    clojure.lang.IFn
+    (invoke [_ key]
+      (generate key))
+    (invoke [_ key obj]
       (destroy key obj))))
 
 
@@ -64,6 +72,8 @@
   (destroy [key obj]
     ...))"
   [name fields & body]
+  (s/assert (:args (s/spec `defgenerator))
+            (list* name fields body))
   (let [typename (gensym (munge name))
         {:syms [generate destroy]}
         (zipmap (map first body)
@@ -79,7 +89,6 @@
            (new ~typename ~@fields)))))
 
 
-
 (s/fdef controller?
   :args (s/cat :x any?)
   :ret  boolean?)
@@ -92,11 +101,8 @@
 
 (declare get-controller)
 
-(s/def ::controller
-  (s/with-gen controller?
-    #(gen/fmap get-controller
-               (s/gen (s/or :fixed ::fixed-controller-options
-                            :util  ::utilization-controller-options)))))
+
+(s/def ::controller controller?)
 
 
 (s/fdef controller
@@ -131,6 +137,8 @@
   (adjustment [stats-map]
     ...))"
   [name fields & body]
+  (s/assert (:args (s/spec `defcontroller))
+            (list* name fields body))
   (let [typename (gensym (munge name))
         {:syms [increment? adjustment]}
         (zipmap (map first body)
@@ -141,6 +149,11 @@
            (~'adjustment [_# ~@(first adjustment)]
              ~@(rest adjustment))
            (~'shouldIncrement [_# ~@(first increment?)]
+             ~@(rest increment?))
+           clojure.lang.IFn
+           (~'invoke [_# ~@(first adjustment)]
+             ~@(rest adjustment))
+           (~'invoke [_# ~@(first increment?)]
              ~@(rest increment?)))
          (defn ~name ~fields
            (new ~typename ~@fields)))))
@@ -153,18 +166,19 @@
 
 
 (s/fdef utilization-controller
-  :args (s/cat :target-utilization  ::target-utilization
-               :max-objects-per-key ::max-objects-per-key
-               :max-objects-total   ::max-objects-total)
-
+  :args (s/and (s/cat :target-utilization  ::target-utilization
+                      :max-objects-per-key ::max-objects-per-key
+                      :max-objects         ::max-objects)
+               (fn [{:keys [max-objects-per-key max-objects]}]
+                 (<= max-objects-per-key max-objects)))
   :ret  controller?)
 
 
 (defcontroller utilization-controller
-  [target-utilization max-objects-per-key max-objects-total]
+  [target-utilization max-objects-per-key max-objects]
   (increment? [key key-objects total-objects]
     (and (< key-objects max-objects-per-key)
-         (< total-objects max-objects-total)))
+         (< total-objects max-objects)))
   (adjustment [stats-map]
     (map-values
       (fn [^Stats s]
@@ -175,15 +189,18 @@
 
 
 (s/fdef fixed-controller
-  :args (s/tuple ::max-objects-per-key ::max-objects-total)
+  :args (s/and (s/cat :max-objects-per-key ::max-objects-per-key
+                      :max-objects         ::max-objects)
+               (fn [{:keys [max-objects-per-key max-objects]}]
+                 (<= max-objects-per-key max-objects)))
   :ret  controller?)
 
 
 (defcontroller fixed-controller
-  [max-objects-per-key max-objects-total]
+  [max-objects-per-key max-objects]
   (increment? [key key-objects total-objects]
     (and (< key-objects max-objects-per-key)
-         (< total-objects max-objects-total)))
+         (< total-objects max-objects)))
   (adjustment [stats]
     {}))
 
@@ -200,7 +217,7 @@
   :args (s/cat :binding (s/coll-of simple-symbol? :kind vector? :count 1)
                :body    any?)
   :ret (and ::acquire-callback
-            (s/fspec :args (s/tuple any?) :ret any?)))
+            (s/fspec :args (s/cat :? any?) :ret any?)))
 
 
 (defmacro acquire-callback
@@ -239,6 +256,15 @@
         (.handleObject callback nil)))))
 
 
+(defprotocol IPoolState
+  (-shutdown? [pool] "Internal predicate"))
+
+
+(extend Pool
+  IPoolState
+  {:-shutdown? (private-field Pool "_isShutdown" Boolean/TYPE)})
+
+
 (deftype SimpleCheckedPool
   [delegate-pool healthy?
    check-on-acquire
@@ -266,11 +292,25 @@
   (dispose  [_ k obj]
     (.dispose delegate-pool k obj))
   (shutdown [_]
-    (.shutdown delegate-pool)))
+    (.shutdown delegate-pool))
+  IPoolState
+  (-shutdown? [_]
+    (-shutdown? delegate-pool)))
+
+
+(s/def ::pos-int32
+  (s/with-gen (s/and pos-int?
+                     #(<= % Integer/MAX_VALUE))
+              (constantly
+                (gen/fmap int
+                  (gen/large-integer*
+                    {:max Integer/MAX_VALUE
+                     :min 1})))))
+
 
 (s/def ::check-on-acquire boolean?)
 (s/def ::check-on-release boolean?)
-(s/def ::max-acquire-attempts pos-int?)
+(s/def ::max-acquire-attempts ::pos-int32)
 
 
 (s/fdef simple-checked-pool
@@ -301,20 +341,19 @@
                    ::max-acquire-attempts]))
 
 
-
 (definline ^:private time-unit?
   [x]
   `(instance? TimeUnit ~x))
 
 
 (s/def ::time-unit
-  (s/or :time-unit time-unit?
+  (s/or :time-unit (set (seq (TimeUnit/values)))
         :keyword   #{:nanoseconds :microseconds
                      :milliseconds :seconds
                      :minutes :hours :days}))
 
 
-(s/fdef ->time-unit
+(s/fdef ->timeunit
   :args (s/cat :time-unit? ::time-unit)
   :ret  time-unit?)
 
@@ -323,7 +362,7 @@
   [timeunit]
   (cond (instance? TimeUnit timeunit) timeunit
         (string? timeunit)  (TimeUnit/valueOf
-                             (str/upper-case timeunit))
+                              (str/upper-case timeunit))
         (keyword? timeunit) (recur (name timeunit))
         :else (throw (IllegalArgumentException.
                        (format "Invalid TimeUnit: %s %s"
@@ -331,9 +370,8 @@
 
 
 (s/def ::generator-options
-  (s/or :generator     (s/keys :req-un [::generator])
-        :generator-fns (s/keys :req-un [::generate
-                                        ::destroy])))
+  (s/keys :req-un [(or (and ::generate ::destroy)
+                       ::generator)]))
 
 
 (s/fdef get-generator
@@ -354,22 +392,20 @@
 (s/def ::increment? fn?)
 (s/def ::adjustment fn?)
 (s/def ::target-utilization
-   (s/double-in :infinite? false
-                :NaN?      false
-                :min       0.0
-                :max       1.0))
-(s/def ::max-objects-per-key pos-int?)
-(s/def ::max-objects-total pos-int?)
-(s/def ::max-objects pos-int?)
+  (s/double-in :infinite? false
+               :NaN?      false
+               :min       Double/MIN_VALUE
+               :max       1.0))
+(s/def ::max-objects-per-key ::pos-int32)
+(s/def ::max-objects ::pos-int32)
 
 
 (s/def ::fixed-controller-options
-  (s/and (s/keys :opt-un [::max-objects
-                          ::max-objects-per-key
-                          ::max-objects-total])
-         (s/or   :max-objects         (s/keys :req-un [::max-objects])
-                 :max-objects-per-key (s/keys :req-un [::max-objects-per-key])
-                 :max-objects-total   (s/keys :req-un [::max-objects-total]))))
+  (s/and (s/keys :req-un [::max-objects]
+                 :opt-un [::max-objects-per-key])
+         (fn [{:keys [max-objects max-objects-per-key]}]
+           (<= (or max-objects-per-key max-objects)
+               max-objects))))
 
 
 (s/def ::utilization-controller-options
@@ -378,11 +414,10 @@
 
 
 (s/def ::controller-options
-  (s/or :controller     (s/keys :req-un [::controller])
-        :controller-fns (s/keys :req-un [::increment?
-                                         ::adjustment])
-        :utilz-opts     ::utilization-controller-options
-        :fixed-opts     ::fixed-controller-options))
+  (s/or :controller (s/keys :req-un [(or (and ::increment? ::adjustment)
+                                         ::controller)])
+        :utilz-opts ::utilization-controller-options
+        :fixed-opts ::fixed-controller-options))
 
 
 (s/fdef get-controller
@@ -394,38 +429,50 @@
 (defn- get-controller
   "Find or construct a Pool Controller from a pool options map."
   [{:keys [increment? adjustment
-           max-object-per-key
-           max-objects-total
+           max-objects-per-key
            max-objects
            target-utilization]
       :as pool-opts}]
   (or (:controller pool-opts)
       (when (and increment? adjustment)
         (controller increment? adjustment))
-      (when (and (or max-objects max-objects-total max-object-per-key)
+      (when (and (or max-objects max-objects-per-key)
                  target-utilization)
         (utilization-controller
           (double target-utilization)
-          (int (or max-object-per-key max-objects max-objects-total))
-          (int (or max-objects-total max-objects max-object-per-key))))
-      (when (or max-objects max-objects-total max-object-per-key)
+          (int (or max-objects-per-key max-objects))
+          (int max-objects)))
+      (when (or max-objects max-objects-per-key)
         (fixed-controller
-          (int (or max-object-per-key max-objects max-objects-total))
-          (int (or max-objects-total max-objects max-object-per-key))))))
+          (int (or max-objects-per-key max-objects))
+          (int max-objects)))))
 
 
-(s/def ::max-queue-length pos-int?)
+(def DEFAULT_MAX_QUEUE_LENGTH 65536)
+(def DEFAULT_SAMPLE_PERIOD    25)
+(def DEFAULT_CONTROL_PERIOD   1000)
+(def DEFAULT_TIME_UNIT        TimeUnit/MILLISECONDS)
+
+
+(s/def ::max-queue-length ::pos-int32)
 (s/def ::sample-period    pos-int?)
 (s/def ::control-period   pos-int?)
 
 
 (s/def ::pool-options
-  (s/and ::generator-options
-         ::controller-options
-         (s/keys :opt-un [::max-queue-length
-                          ::sample-period
-                          ::control-period
-                          ::time-unit])))
+  (s/merge ::generator-options
+           ::controller-options
+           (s/and (s/keys :opt-un [::max-queue-length
+                                   ::sample-period
+                                   ::control-period
+                                   ::time-unit])
+                  (fn [{:keys [sample-period control-period]}]
+                    (<= (or sample-period DEFAULT_SAMPLE_PERIOD)
+                        (or control-period DEFAULT_CONTROL_PERIOD)))
+            (s/keys :opt-un [::healthy?
+                             ::check-on-acquire
+                             ::check-on-release
+                             ::max-acquire-attempts]))))
 
 
 (s/fdef pool?
@@ -442,8 +489,8 @@
 
 
 (s/fdef pool
-  :args (s/cat :opts (s/or :pool    ::pool
-                           :options ::pool-options))
+  :args (s/cat :opts (s/or :options ::pool-options
+                           :pool    ::pool))
   :ret  pool?)
 
 
@@ -456,10 +503,10 @@
                            (throw (ex-info "Missing Generator" pool-options)))
                        (or (get-controller pool-options)
                            (throw (ex-info "Missing Controller" pool-options)))
-                       (int (:max-queue-length pool-options 65536))
-                       (long (:sample-period pool-options 25))
-                       (long (:control-period pool-options 1000))
-                       (->timeunit (:time-unit pool-options TimeUnit/MILLISECONDS)))
+                       (int (:max-queue-length pool-options DEFAULT_MAX_QUEUE_LENGTH))
+                       (long (:sample-period pool-options DEFAULT_SAMPLE_PERIOD))
+                       (long (:control-period pool-options DEFAULT_CONTROL_PERIOD))
+                       (->timeunit (:time-unit pool-options DEFAULT_TIME_UNIT)))
 
                 (s/valid? pool-options ::simple-checked-pool-options)
                 (simple-checked-pool (:healty? pool-options) pool-options))))
@@ -496,7 +543,8 @@
 
 
 (definline release!
-  "Release an object for a key back to a pool."
+  "Release an object for a key back to a pool.
+Returns the pool."
   [^IPool pool key obj]
   `(do (.release ~pool ~key ~obj)
        ~pool))
@@ -508,7 +556,8 @@
 
 
 (definline dispose!
-  "Dispose of an object for a key from a pool."
+  "Dispose of an object for a key from a pool.
+Returns the pool."
   [^IPool pool key obj]
   `(do (.dispose ~pool ~key ~obj)
        ~pool))
@@ -519,15 +568,20 @@
   :ret  nil?)
 
 
-(definline shutdown!
+(defn shutdown!
   "Shutdown a pool."
   [^IPool pool]
-  `(.shutdown ~pool))
+  (.shutdown pool))
+
+
+(defn shutdown?
+  [pool]
+  (-shutdown? pool))
 
 
 (s/fdef with-resource
-  :args (s/cat :binding (s/and vector?
-                               (s/spec (s/cat :sym simple-symbol?
+  :args (s/cat :binding (s/spec (s/and vector?
+                                       (s/cat :sym simple-symbol?
                                               :pool any?
                                               :key  (s/? any?))))
                :body (s/* any?))
