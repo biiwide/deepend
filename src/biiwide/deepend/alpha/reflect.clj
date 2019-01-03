@@ -2,9 +2,7 @@
   "Utility functions for reflective access."
   (:refer-clojure :exclude [get-method])
   (:require [clojure.spec.alpha :as s])
-  (:import  [java.lang.invoke MethodHandle MethodHandles
-                              VarHandle VarHandle$AccessMode]
-            [java.lang.reflect Field Method]))
+  (:import  [java.lang.reflect Field Method]))
 
 
 (s/fdef get-method
@@ -32,11 +30,12 @@
 
 
 (defmacro ^:private ????
-  ([] (throw (IllegalStateException. "No matching condition found!")))
+  ([]
+   (throw (IllegalStateException. "No matching condition found!")))
   ([test form & more-pairs]
    (if (eval test)
      form
-     (cons `???? ~@more-pairs))))
+     (cons `???? more-pairs))))
 
 
 (s/fdef private-field
@@ -49,20 +48,25 @@
   [clazz field-name field-type]
   (????
     (has-private-lookup-in?)
-    (when-some [^MethodHandle mh
-                (as-> (MethodHandles/lookup) lookup
-                      (MethodHandles/privateLookupIn clazz lookup)
+    (when-some [^java.lang.invoke.MethodHandle mh
+                (as-> (java.lang.invoke.MethodHandles/lookup) lookup
+                      (java.lang.invoke.MethodHandles/privateLookupIn clazz lookup)
                       (.findVarHandle lookup clazz field-name field-type)
-                      (.toMethodHandle lookup VarHandle$AccessMode/GET))]
+                      (.toMethodHandle lookup java.lang.invoke.VarHandle$AccessMode/GET))]
       (fn [obj]
         (-> (.bindTo mh obj)
             (.invokeWithArguments []))))
 
     :else
-    (when-some [field (or (try (.getDeclaredField clazz field-name)
-                            (catch Exception e nil))
-                          (try (.getField class field-name)
-                            (catch Exception e nil)))]
-      (.setAccessible field)
-      (fn [obj]
-        (.get ^Field field obj)))))
+    (when-some [^Field field
+                (or (try (.getDeclaredField clazz field-name)
+                      (catch Exception e nil))
+                    (try (.getField class field-name)
+                      (catch Exception e nil)))]
+      (assert (= field-type (.getType field)))
+      (.setAccessible ^Field field true)
+      (condp = field-type
+        Boolean/TYPE (fn boolean-field [obj]
+                       (.booleanValue (.get ^Field field obj)))
+        (fn object-field [obj]
+          (.get ^Field field obj))))))
