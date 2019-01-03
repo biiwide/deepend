@@ -38,7 +38,7 @@ Fixed object pool with `generator`:
 (pool/pool
   {:generator prod-client
    :max-objects-per-key 8
-   :max-objects-total   24
+   :max-objects         24
    })
 ```
 
@@ -48,7 +48,7 @@ Utilization pool:
   {:generator           my-custom-generator
    :target-utilization  1.0
    :max-objects-per-key 5
-   :max-objects-total   15})
+   :max-objects         15})
 ```
 
 Pool with basic resource health check:
